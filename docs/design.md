@@ -1,7 +1,13 @@
 # episode_recorder — design
 
-Status: design only. Nothing here has been built or measured. Every number
-quoted from a submodule is that submodule's measurement, not this repo's.
+Status: build order step 1 (§13) is implemented and tested without hardware. Nothing
+here has been measured against the card or the Pi. Every number quoted from a submodule
+is that submodule's measurement, not this repo's.
+
+Passages marked **Corrected** were changed after reading the submodules' source while
+building step 1. They are corrections of what was read, not of anything measured.
+docs/formats.md and docs/timebase.md are the specifications. Where this document and
+they differ, they win.
 
 ---
 
@@ -79,7 +85,7 @@ one of them is a redesign, not a patch.
   Raspberry Pi 5 ───── USB HID gadget ──────► console
   (rpi_gamepad_bridge)
      │
-     │ UDP, 48-byte GamepadState + HMAC, ~125 Hz, wired gigabit
+     │ UDP, 48-byte GamepadState + 16-byte HMAC tag, once per source read, wired gigabit
      ▼
   rig ◄──── HDMI capture card (USB3) ◄──── console (HDMI loop-out ► monitor)
    │
@@ -224,7 +230,7 @@ the video side.
 
 ```
 header (64 B):
-  magic        u32   'ERC1'
+  magic        char[4]   'ERC1'
   version      u16
   record_size  u16   64
   struct_fmt   char[32]  "<IHHIIQQhhhhBB6s"   as advertised by the bridge
@@ -235,7 +241,9 @@ record (64 B):
   arrival_ns   u64      ts_rig_mono_ns
   flags        u32      bit0 seq gap before this record
                        bit1 HMAC failure
-                       bit2 stale (seq regression)
+                       bit2 stale (seq did not advance; late or duplicate)
+                       bit3 seq restart (fell back by more than 64)
+                       bit4 malformed (length, magic or version)
   reserved     u32
 ```
 
@@ -245,8 +253,10 @@ version(2) size(2) seq(4) buttons(4), **two u64 timestamps** (`CLOCK_MONOTONIC`
 and `CLOCK_REALTIME`), four axes(8), two u8, 6 pad. So the sequence number and
 `ts_pi_mono_ns` ride along at no cost.
 
-The 32-byte HMAC-SHA256 tag is **verified at the socket and discarded** — only
-the pass/fail bit is kept. Storing it would not fit and would serve nothing.
+The HMAC-SHA256 tag is **verified at the socket and discarded**. Only the
+pass/fail bit is kept. Storing it would serve nothing. **Corrected:** the tag is 16
+bytes (truncated, `gpb_client/auth.py` `TAG_BYTES`), not 32, so a signed datagram is
+64 bytes.
 
 The 48 bytes are stored **unparsed**. Parsing is the codec's job and happens
 offline. The receiver reads the sequence number only, to detect gaps.
@@ -256,8 +266,13 @@ marker would not fit. That is why `record_size` is a header field: bump
 `version`, change `record_size`, readers dispatch. At ~8 KB/s, going to 128-byte
 records would cost ~58 MB/hour, so the format should never need a migration.
 
-At ~125 Hz this is ~8 KB/s. Storage is a non-issue; the only real risk on this
-path is stalling the socket.
+**Corrected:** the rate is not a steady ~125 Hz. The bridge's heartbeat re-sends
+state to the console, but publishing happens only on a successful source read
+(`src/bridge.cpp`). For an evdev pad that is once per input report batch, so zero
+while nothing moves (if the stick does not drift), and the pad's report rate while it
+does. For a UDP or socket client it is once per datagram that client sends. At
+125 Hz, 64-byte records are ~8 KB/s. Storage is a non-issue either way; the only real
+risk on this path is stalling the socket.
 
 ### `marks.jsonl`
 
@@ -277,7 +292,7 @@ Written at session **start**, so a crashed session is still identifiable.
 
 ```json
 {
-  "session_id": "2026-09-13T14:02:11Z-a3f9",
+  "session_id": "2026-09-13T140211Z-a3f9",
   "schema_version": 1,
   "started_at": "2026-09-13T14:02:11Z",
   "fps": 30,
@@ -350,12 +365,21 @@ path. Pairing inside a capture loop is the first of the three mistakes
 `composition.md` lists, and it is how frames get dropped.
 
 - Size `SO_RCVBUF` generously (≥ 8 MB). At 8 KB/s that is minutes of slack, so a
-  GC pause or a scheduling hiccup cannot lose a datagram.
-- **Sequence gaps are the only visibility into loss.** There are two independent
-  loss paths: UDP on the wire, and the bridge's bounded ring overflowing — which
-  the bridge reports as *sent*, never as delivered, because UDP cannot tell you
-  whether anyone received it. Flag the record after a gap and count gaps per
-  session.
+  GC pause or a scheduling hiccup cannot lose a datagram. **Corrected:** Linux caps
+  the request at `net.core.rmem_max` (often ~200 KB) without an error, and reports
+  double what it applied. Record what was granted; preflight warns when capped.
+- **Do not set `SO_REUSEADDR`.** `gpb_client.CaptureReceiver` does. On Linux that
+  lets a second process bind the same UDP port, and unicast datagrams then reach only
+  one of the two, so two recorders started by mistake would split the stream silently.
+- **Sequence gaps are the only visibility into loss, and they do not see all of it.**
+  **Corrected:** the bounded ring is the bridge's *file* recorder, not the publisher.
+  The publisher does one non-blocking `sendto` per state, counting failures on the Pi
+  as `failed`. Loss after that is UDP on the wire or the rig's receive queue
+  overflowing, and a seq gap shows both. What it cannot show is coalescing: a bridge
+  read that drains several input reports publishes only the last, with `seq` advancing
+  by one. Nor is a lost state re-sent until the input next produces a read. A
+  disconnect releases the console to neutral without publishing, so the stream can end
+  with a button held. Flag the record after a gap and count gaps per session.
 - Stale datagrams (seq regression) are flagged and kept, not dropped. The
   builder decides.
 
@@ -373,18 +397,25 @@ pipeline and the most likely to save a collection day.
   restarted an hour ago is the exact mirror failure.
 - `query_capabilities()` matches the config's action spec — trigger mode and
   axis list.
-- Free disk ≥ estimated session size × 1.5. At 30 fps budget ~27 GB/hour.
-  `hdmi_capture` lists behaviour as a disk approaches full as untested.
+- Free disk ≥ estimated session size × 1.5. **Corrected:** 27 GB/hour is
+  hdmi_capture's round figure for 30 fps. Its README says to plan against the
+  detailed-content row, 52–69 GB/hour at 60 fps, which is 26–35 GB/hour at 30. The
+  budget uses the top of that range (317 KB/frame). `hdmi_capture` lists behaviour
+  as a disk approaches full as untested.
 - Device resolved through `/dev/v4l/by-id/`, never `/dev/videoN`.
 
-During the session, a watchdog hard-flags or aborts if either stream goes quiet
-for more than ~1 s, and writes the reason to `events.log`.
+During the session, a watchdog writes to `events.log` when either stream goes
+quiet. **Corrected:** a quiet *control* stream is logged and recorded as a span in
+the manifest, never used to abort. The bridge does not publish on its heartbeat, so
+an untouched pad and a dead link look the same at capture time. Quiet *video* stops
+the session, because vcap's generator ends on `NoSignal`. That takes vcap's 2 s read
+timeout plus `video_patience_s`, not ~1 s. A dead receiver process stops the session.
 
 ### 7.3 Session runner (`capture/session.py`)
 
 Starts the `vcap` Session and the receiver as independent paths — neither can
-stall the other — writes the manifest first, and stops both on mark, timeout or
-signal. Passes `notes={"session_id": ...}` into the vcap manifest so a video
+stall the other — writes the manifest first, and stops both on timeout or signal.
+(No mark kind stops a session yet. The receiver runs in its own process.) Passes `notes={"session_id": ...}` into the vcap manifest so a video
 directory is traceable back to a session even if everything else is lost.
 
 Recording is **continuous for the whole session**. Episode boundaries are
@@ -631,18 +662,20 @@ One TOML file per game profile. Standalone default ships in
 [capture]
 fps = 30
 device_match = "MACROSILICON"
-control_bind = "0.0.0.0:9001"
+control_bind = "0.0.0.0:9872"   # the bridge's default publish_port
 max_session_seconds = 3600
 
+# Corrected: sources use the bridge's names -- axes lx ly rx ry lt rt, buttons by
+# physical position -- not vendor labels. Switch A is the east position.
 [action]
 dims = [
-  { name = "steer_x", source = "axis.left_x", kind = "continuous", range = [-1.0, 1.0] },
-  { name = "accel",   source = "button.a",    kind = "binary" },
-  { name = "drift",   source = "button.r",    kind = "binary" },
+  { name = "steer_x", source = "axis.lx",     kind = "continuous", range = [-1.0, 1.0] },
+  { name = "accel",   source = "button.east", kind = "binary" },
+  { name = "drift",   source = "button.r1",   kind = "binary" },
 ]
 [action.defaults]           # what decode() writes for everything not in dims
-"button.b" = 0
-"axis.right_x" = 0.0
+"button.south" = 0
+"axis.rx" = 0.0
 
 [segment]
 strategy = "fixed_chunk"    # fixed_chunk | marks | plugin
@@ -693,7 +726,8 @@ episode_filters = []
   A10G for a few dollars a run. Defer any GPU purchase until SmolVLA makes 24 GB
   worth buying. Training convergence in this space is typically 5–10 epochs over
   the dataset, so runs are hours.
-- **Scratch**: ~27 GB/hour raw at 30 fps. 1 TB ≈ 35 hours.
+- **Scratch**: 26–35 GB/hour raw at 30 fps with detailed content (hdmi_capture's 60 fps
+  figures, halved; not measured here). 1 TB ≈ 29–38 hours.
 
 ---
 
