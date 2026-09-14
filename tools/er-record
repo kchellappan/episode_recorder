@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Record a session: preflight, then controls and video until Ctrl-C or the time limit.
+
+Refuses to start if preflight fails. The preflight report and preview are kept under
+<data-root>/preflight/<session id>/ either way. On success the session is written to
+<data-root>/sessions/<session id>/. Recording is continuous. Episodes are cut later.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import sys
+
+import _path  # noqa: F401
+
+from episode_recorder import config as config_mod
+from episode_recorder.capture import preflight as pf
+from episode_recorder.capture import session as sess
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--config", help="profile TOML, merged over the standalone default")
+    ap.add_argument("--data-root", required=True,
+                    help="data directory; sessions go in <data-root>/sessions/")
+    ap.add_argument("--label", action="append", default=[], metavar="KEY=VALUE",
+                    help="session label, inherited by every episode cut from it (repeatable)")
+    ap.add_argument("--seconds", type=float,
+                    help="stop after this long (default: capture.max_session_seconds)")
+    ap.add_argument("--picture-confirmed", action="store_true",
+                    help="assert the card is capturing the console's picture without being "
+                         "asked; the report records that it was asserted, not answered")
+    args = ap.parse_args(argv)
+
+    try:
+        cfg = config_mod.load(args.config)
+        key = config_mod.read_key(cfg)
+        labels = sess.parse_labels(args.label)
+    except (OSError, config_mod.ConfigError) as exc:
+        print(f"config: {exc}", file=sys.stderr)
+        return 2
+    seconds = args.seconds if args.seconds is not None else cfg["capture"]["max_session_seconds"]
+
+    session_id = sess.new_session_id()
+    preflight_dir = os.path.join(args.data_root, "preflight", session_id)
+    os.makedirs(preflight_dir)
+    report = pf.run_preflight(
+        cfg, key=key, preview_path=os.path.join(preflight_dir, "preview.jpg"),
+        disk_path=args.data_root, confirm_picture=pf.terminal_confirm(args.picture_confirmed),
+        session_seconds=seconds)
+    with open(os.path.join(preflight_dir, "preflight.json"), "w") as fh:
+        json.dump(report.to_dict(), fh, indent=2)
+        fh.write("\n")
+    print(pf.format_report(report))
+    if not report.passed:
+        print(f"refusing to record; report in {preflight_dir}", file=sys.stderr)
+        return 1
+
+    stop = sess.StopRequest()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda s, _f: stop.set(f"signal:{signal.Signals(s).name}"))
+
+    caps = report.check("capabilities")
+    result = sess.record_session(
+        cfg, data_root=args.data_root,
+        video_factory=sess.vcap_video_factory(report.device, cfg["capture"]),
+        key=key, device_identity=report.device.identity(),
+        bridge_capabilities=caps.data.get("capabilities") if caps else None,
+        preflight=report.to_dict(), session_labels=labels, stop=stop, max_seconds=seconds,
+        session_id=session_id,
+        on_started=lambda ctx: print(f"\nrecording {ctx.session_id}; Ctrl-C to stop"))
+
+    ended = result.manifest["ended"]
+    counters = (ended.get("controls") or {}).get("counters") or {}
+    video = ended.get("video") or {}
+    print(f"\nstopped: {result.stop_reason}")
+    print(f"  video     {video.get('frames_written')} frames, "
+          f"{video.get('effective_fps') or 0:.2f} fps effective")
+    print(f"  controls  {counters.get('received')} datagrams, {counters.get('seq_gaps')} gaps "
+          f"({counters.get('seq_lost')} lost), {counters.get('stale')} stale, "
+          f"{counters.get('hmac_failures')} hmac failures, {counters.get('malformed')} malformed")
+    print(f"  quiet     {len(ended.get('controls_quiet_spans') or [])} control silences over "
+          f"{ended.get('controls_quiet_warn_ms')} ms (see events.log)")
+    print(f"  session   {result.directory}")
+    return 0 if result.clean else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

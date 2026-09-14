@@ -1,0 +1,80 @@
+# Standalone profile: no plugins, no labels, no game knowledge.
+#
+# A game profile is merged over this file key by key (lists replace), and the merged result
+# is inlined into every session manifest. Only sections with code behind them are here.
+# [segment], [resample], [holes], [build] and [plugins] from docs/design.md arrive with the
+# code that reads them. A setting that nothing reads is a claim that nothing checks.
+
+[capture]
+fps = 30
+width = 1920
+height = 1080
+# Matched against the device's by-id name. find_capture_card() never falls back to
+# /dev/videoN.
+device_match = "MACROSILICON"
+
+# Where the bridge publishes capture: bridge.publish_host/publish_port on the Pi.
+# 9872 is the bridge's documented default.
+control_bind = "0.0.0.0:9872"
+# Path to a file holding the bridge's publish_key. Empty means no authentication, which only
+# works if the bridge's publish_key is also empty. Never put the key itself in this file.
+control_key_file = ""
+
+# The Pi, for query_capabilities(). Empty fails preflight: guessing the target's trigger
+# mode fails silently.
+bridge_host = ""
+bridge_caps_port = 9871
+
+max_session_seconds = 3600
+
+# Requested receive buffer. Linux caps it at net.core.rmem_max. Preflight reports what was
+# granted and warns when it was capped.
+socket_rcvbuf_bytes = 8388608
+# How often received records are pushed to the OS. A SIGKILL loses at most this much.
+flush_interval_ms = 250
+# Logged as a warning, never an abort. The bridge publishes once per input read, not on its
+# heartbeat, so an untouched pad and a dead link can look alike.
+control_quiet_warn_ms = 1000
+
+# vcap's patience: how long NoSignal is tolerated before the session stops. 0 stops after
+# vcap's first 2 s read timeout.
+video_patience_s = 0
+video_queue_depth = 240
+
+# Disk budget per frame: hdmi_capture's measured upper bound, 19 MB/s at 1080p60 with
+# detailed video on screen. That figure comes from the submodule and was not measured here.
+budget_bytes_per_frame = 317000
+disk_headroom = 1.5
+
+[preflight]
+video_seconds = 2.0
+control_seconds = 5.0
+min_control_datagrams = 10
+
+# Controls recorded from the bridge, named as the bridge names them: axes lx ly rx ry lt rt,
+# buttons by physical position. Preflight checks these against query_capabilities(). Ranges
+# and replay defaults arrive with actions/ (build order step 3). This default is the whole
+# pad with digital triggers, which matches the HORIPAD target the bridge presents.
+[action]
+dims = [
+  { name = "lx", source = "axis.lx", kind = "continuous" },
+  { name = "ly", source = "axis.ly", kind = "continuous" },
+  { name = "rx", source = "axis.rx", kind = "continuous" },
+  { name = "ry", source = "axis.ry", kind = "continuous" },
+  { name = "south", source = "button.south", kind = "binary" },
+  { name = "east", source = "button.east", kind = "binary" },
+  { name = "west", source = "button.west", kind = "binary" },
+  { name = "north", source = "button.north", kind = "binary" },
+  { name = "l1", source = "button.l1", kind = "binary" },
+  { name = "r1", source = "button.r1", kind = "binary" },
+  { name = "l2", source = "button.l2", kind = "binary" },
+  { name = "r2", source = "button.r2", kind = "binary" },
+  { name = "select", source = "button.select", kind = "binary" },
+  { name = "start", source = "button.start", kind = "binary" },
+  { name = "l3", source = "button.l3", kind = "binary" },
+  { name = "r3", source = "button.r3", kind = "binary" },
+  { name = "dup", source = "button.dup", kind = "binary" },
+  { name = "ddown", source = "button.ddown", kind = "binary" },
+  { name = "dleft", source = "button.dleft", kind = "binary" },
+  { name = "dright", source = "button.dright", kind = "binary" },
+]

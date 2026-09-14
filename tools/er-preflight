@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Check the card, the picture, the controls, the bridge and the disk, without recording.
+
+Runs the checks er-record runs before every session, then writes the report and a preview
+of what the card is capturing. Exits non-zero if any check failed.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import os
+import sys
+
+import _path  # noqa: F401
+
+from episode_recorder import config as config_mod
+from episode_recorder.capture import preflight as pf
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--config", help="profile TOML, merged over the standalone default")
+    ap.add_argument("--data-root", default="data",
+                    help="where sessions will be written, for the disk check (default: data)")
+    ap.add_argument("--seconds", type=float,
+                    help="session length to budget disk for (default: capture.max_session_seconds)")
+    ap.add_argument("--out", help="directory for preflight.json and preview.jpg "
+                                  "(default: ./preflight-<utc time>)")
+    ap.add_argument("--picture-confirmed", action="store_true",
+                    help="assert the card is capturing the console's picture without being "
+                         "asked; the report records that it was asserted, not answered")
+    args = ap.parse_args(argv)
+
+    try:
+        cfg = config_mod.load(args.config)
+        key = config_mod.read_key(cfg)
+    except (OSError, config_mod.ConfigError) as exc:
+        print(f"config: {exc}", file=sys.stderr)
+        return 2
+
+    out = args.out or f"preflight-{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%dT%H%M%SZ}"
+    os.makedirs(out, exist_ok=True)
+    report = pf.run_preflight(
+        cfg, key=key, preview_path=os.path.join(out, "preview.jpg"), disk_path=args.data_root,
+        confirm_picture=pf.terminal_confirm(args.picture_confirmed),
+        session_seconds=args.seconds)
+    with open(os.path.join(out, "preflight.json"), "w") as fh:
+        json.dump(report.to_dict(), fh, indent=2)
+        fh.write("\n")
+    print(pf.format_report(report))
+    print(f"report: {os.path.join(out, 'preflight.json')}")
+    return 0 if report.passed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
