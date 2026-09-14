@@ -172,7 +172,10 @@ strengthened. This is not every line of the code.
 - **Everything against hardware.** `vcap.Session` inside `er-record`, device resolution, the
   interactive preflight prompts, the bridge's C++ publisher, and a real network link.
   `tests/hardware.sh` has been syntax-checked and never run.
-- **CI.** `.github/workflows/ci.yml` is written but has never run. There is no remote.
+- **What CI proves.** `.github/workflows/ci.yml` runs `tests/docker.sh` on GitHub's
+  `ubuntu-latest`, and its first run passed (13 of 13). It checks exactly what the
+  hardware-free suite checks and nothing more, so a green tick says nothing about the card,
+  the Pi or a real network.
 - **Throughput.** Loopback tests stream at 125 Hz for seconds. Nothing tests a pad reporting
   at 1000 Hz, bursts, or the receiver's CPU cost.
 - **Duration.** The longest test session is about 2.4 s. The default limit is an hour.
