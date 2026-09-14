@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+# Sessions and datasets live in the game repo that submodules this one, never here.
+data/
+preflight-*/
