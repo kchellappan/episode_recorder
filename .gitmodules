@@ -1,0 +1,6 @@
+[submodule "third_party/hdmi_capture"]
+	path = third_party/hdmi_capture
+	url = https://github.com/kchellappan/hdmi_capture
+[submodule "third_party/rpi_gamepad_bridge"]
+	path = third_party/rpi_gamepad_bridge
+	url = https://github.com/kchellappan/rpi_gamepad_bridge
