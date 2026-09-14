@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Hardware-free suite (container)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      # The same script used locally: the suite in a read-only, network-less container.
+      # What it cannot reach is the capture card and the Pi -- tests/hardware.sh -- so a
+      # green tick here says nothing about the V4L2 path or a real bridge.
+      - name: Test
+        run: ./tests/docker.sh
